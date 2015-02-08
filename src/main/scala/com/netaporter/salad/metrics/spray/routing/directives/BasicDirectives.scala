@@ -17,14 +17,12 @@
 //package com.netaporter.salad.spray.routing
 package com.netaporter.salad.metrics.spray.routing.directives
 
-import scala.util.control.NonFatal
-import shapeless._
-import spray.http._
-import spray.routing._
-import spray.http.HttpRequest
-import spray.http.HttpResponse
-import spray.routing.RequestContext
 import akka.actor.Status.Failure
+import shapeless._
+import spray.http.{ HttpRequest, HttpResponse, _ }
+import spray.routing.{ RequestContext, _ }
+
+import scala.util.control.NonFatal
 
 // Basically provides what could be also known as a AOP around context for
 // spray routes
@@ -34,8 +32,13 @@ trait BasicDirectives {
     mapInnerRoute { inner ⇒
       ctx ⇒
         val (ctxForInnerRoute, after) = before(ctx)
-        try inner(ctxForInnerRoute.withRouteResponseMapped(after))
-        catch { case NonFatal(ex) ⇒ after(Failure(ex)) }
+        try {
+          inner(ctxForInnerRoute.withRouteResponseMapped(after))
+        } catch {
+          case NonFatal(ex) ⇒
+            after(Failure(ex))
+            ctx.failWith(ex)
+        }
     }
 
   def mapInnerRoute(f: Route ⇒ Route): Directive0 = new Directive0 {

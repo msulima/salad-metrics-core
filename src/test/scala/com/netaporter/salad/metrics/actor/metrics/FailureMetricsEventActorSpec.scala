@@ -1,106 +1,79 @@
 package com.netaporter.salad.metrics.actor.metrics
 
-import spray.routing.{ ValidationRejection, HttpService }
-import _root_.spray.testkit.ScalatestRouteTest
-import akka.actor.{ Props, ActorSystem, ActorRef }
-import com.netaporter.salad.metrics.util.{ AtomicCounterMetricsActoryFactory, ActorSys }
-
-import org.scalatest.{ ParallelTestExecution, fixture, OptionValues, Matchers }
+import com.netaporter.salad.metrics.messages.MetricEventMessage.IncCounterEvent
 import com.netaporter.salad.metrics.spray.metrics.MetricsDirectiveFactory
-import com.netaporter.salad.metrics.messages.MetricAdminMessage.{ MetricsResponse, MetricsRequest }
-import scala.concurrent.duration.Duration
-import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import com.netaporter.salad.metrics.actor.factory.MetricsActorFactory
+import com.netaporter.salad.metrics.util.ActorSys
+import org.scalatest.{ ParallelTestExecution, fixture }
+import spray.http.StatusCodes
+import spray.routing.{ HttpService, Route, ValidationRejection }
+import spray.testkit.ScalatestRouteTest
 
 /**
  * Created by d.tootell@london.net-a-porter.com on 03/02/2014.
  */
-class FailureMetricsEventActorSpec extends fixture.WordSpec with Matchers with ScalatestRouteTest with fixture.UnitFixture
-    with ParallelTestExecution with HttpService with OptionValues {
-  def actorRefFactory = system // connect the DSL to the test ActorSystem
-  def makeEventActor(factory: MetricsActorFactory)(implicit system: ActorSystem): ActorRef = factory.eventActor()
-  def makeAdminActor(factory: MetricsActorFactory)(implicit system: ActorSystem): ActorRef = factory.eventTellAdminActor()
-  def makeReturningAdminActor(factory: MetricsActorFactory)(implicit system: ActorSystem): ActorRef = factory.eventAskAdminActor()
+class FailureMetricsEventActorSpec extends fixture.WordSpec with ScalatestRouteTest with fixture.UnitFixture
+    with ParallelTestExecution with HttpService {
 
-  def rejectionRoute(metric: ActorRef, adminActor: ActorRef,
-    timerName: String) = {
-    val factory = MetricsDirectiveFactory(metric)
-    val time = factory.timer(timerName).time
-    val requestCounter = factory.counterWithMethod("all").all.count
-    val request = factory.counter("bobrequests").all.count
-
-    val metrics = time & requestCounter
-
-    metrics {
-      get {
-        pathSingleSlash { ctx =>
-          {
-            ctx.reject(ValidationRejection("Restricted!"))
-          }
-        }
-      }
-    }
-  }
-
-  def failureRoute(metric: ActorRef, adminActor: ActorRef,
-    timerName: String) = {
-    val factory = MetricsDirectiveFactory(metric)
-    val time = factory.timer(timerName).time
-    val requestCounter = factory.counterWithMethod("all").failures.count
-
-    val metrics = time & requestCounter
-
-    metrics {
-      get {
-        pathSingleSlash { ctx =>
-          {
-            ctx.failWith(new NullPointerException("lkdjlj"))
-          }
-
-        }
-      }
-    }
-  }
+  def actorRefFactory = system
 
   "Metrics Event Actor" should {
-    "should capture rejections" in new ActorSys {
-      val latch = new CountDownLatch(2);
-      val factory = new AtomicCounterMetricsActoryFactory(latch)
-      val metricActor = makeEventActor(factory)
-      val adminActor = makeAdminActor(factory)
-      val returningStringActor = makeReturningAdminActor(factory)
 
-      Get() ~> rejectionRoute(metricActor, adminActor, "mytimer1") ~> check {
-        assert(rejection.getClass == classOf[ValidationRejection])
+    "should capture rejections" in new Context {
+      val validationRejection = ValidationRejection("Restricted!")
+      val route = testRoute {
+        reject(validationRejection)
       }
 
-      Get() ~> rejectionRoute(metricActor, adminActor, "mytimer2") ~> check {
-        assert(rejection.getClass == classOf[ValidationRejection])
+      Get() ~> route ~> check {
+        assert(rejection == validationRejection)
+      }
+      expectMsg(IncCounterEvent("methodName.GET.rejections"))
+    }
+
+    "should capture failures" in new Context {
+      val route = testRoute {
+        complete(StatusCodes.NotFound)
       }
 
-      try {
-        val ok = latch.await(1, TimeUnit.SECONDS)
-        assert(ok)
-      } catch {
-        case e: Exception => {
-          fail("Exception waiting for metrics messages to be processed")
-        }
-
+      Get() ~> route ~> check {
+        assert(status == StatusCodes.NotFound)
       }
-      returningStringActor ! MetricsRequest
+      expectMsg(IncCounterEvent("methodName.GET.failures"))
+    }
 
-      expectMsgAllClassOf(Duration(1, TimeUnit.SECONDS), classOf[MetricsResponse]) foreach { msg =>
-        msg match {
-          case MetricsResponse(s: String) => {
+    "should capture exceptions" in new Context {
+      val route = testRoute {
+        failWith(new RuntimeException("test exception"))
+      }
 
-            assert(s.contains("mytimer2"))
-            assert(s.contains("mytimer1"))
-            assert(s.contains("\"all.GET.rejections\":{\"count\":2"))
+      Get() ~> route ~> check {
+        assert(status == StatusCodes.InternalServerError)
+      }
+      expectMsg(IncCounterEvent("methodName.GET.exceptions"))
+    }
 
+    "should capture thrown exceptions" in new Context {
+      val route = testRoute {
+        complete(throw new RuntimeException("test exception"))
+      }
+
+      Get() ~> route ~> check {
+        assert(status == StatusCodes.InternalServerError)
+      }
+      expectMsg(IncCounterEvent("methodName.GET.exceptions"))
+    }
+  }
+
+  class Context extends ActorSys {
+    def testRoute(body: => Route) = {
+      val requestCounter = MetricsDirectiveFactory(self).counterWithMethod("methodName").all.count
+      requestCounter {
+        get {
+          pathSingleSlash {
+            body
           }
         }
       }
-
     }
   }
 
